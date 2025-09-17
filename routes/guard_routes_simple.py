@@ -165,16 +165,23 @@ async def scan_qr_code(
         guard_email = current_guard.get("email", "")
         guard_name = current_guard.get("name", "Unknown Guard")
         
-        # Parse QR content - handle both formats: "ObjectId" or "Organization:Site:ObjectId"
+        # Parse QR content - handle multiple formats
         actual_qr_id = qr_id
         qr_organization = None
         qr_site = None
+        assigned_guard_name = None
         
-        # Check if QR content contains organization and site info
+        # Check if QR content contains organization, site, and possibly guard assignment
         if ":" in qr_id:
             parts = qr_id.split(":")
-            if len(parts) == 3:
-                qr_organization, qr_site, actual_qr_id = parts
+            if len(parts) >= 3:
+                qr_organization, qr_site, actual_qr_id = parts[0], parts[1], parts[2]
+                
+                # Check if QR has guard assignment (format: Org:Site:ID:GUARD:GuardName)
+                if len(parts) >= 5 and parts[3] == "GUARD":
+                    assigned_guard_name = parts[4]
+                    logger.info(f"QR code is assigned to guard: {assigned_guard_name}")
+                
                 logger.info(f"Parsed QR content: Organization={qr_organization}, Site={qr_site}, ID={actual_qr_id}")
             else:
                 actual_qr_id = qr_id
@@ -186,6 +193,33 @@ async def scan_qr_code(
         except Exception as e:
             logger.error(f"Error finding QR location for ID {actual_qr_id}: {e}")
             qr_location = None
+        
+        # If QR location found in database, check for guard assignment
+        if qr_location and qr_location.get("assignedGuardId"):
+            db_assigned_guard_id = str(qr_location["assignedGuardId"])
+            current_guard_id = str(current_guard["_id"])
+            
+            # Validate that the current guard is the assigned guard
+            if db_assigned_guard_id != current_guard_id:
+                assigned_guard_name_db = qr_location.get("assignedGuardName", "Unknown Guard")
+                logger.warning(f"Guard {guard_name} (ID: {current_guard_id}) attempted to scan QR assigned to {assigned_guard_name_db} (ID: {db_assigned_guard_id})")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"This QR code is assigned to {assigned_guard_name_db}. Only the assigned guard can scan this QR code."
+                )
+            
+            logger.info(f"QR code assignment validated: Guard {guard_name} is authorized to scan this QR")
+        
+        # If QR content has guard assignment, validate it matches current guard  
+        elif assigned_guard_name:
+            if assigned_guard_name.lower() != guard_name.lower():
+                logger.warning(f"Guard {guard_name} attempted to scan QR assigned to {assigned_guard_name}")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"This QR code is assigned to {assigned_guard_name}. Only the assigned guard can scan this QR code."
+                )
+            
+            logger.info(f"QR code assignment validated: Guard {guard_name} is authorized to scan this QR")
         
         if not qr_location:
             # Use parsed info from QR content if available, otherwise fallback
@@ -201,10 +235,11 @@ async def scan_qr_code(
         # Create scan event (simplified)
         scanned_at = datetime.utcnow()
         
-        # Convert to IST for Excel
-        ist_timezone = timezone(timedelta(hours=5, minutes=30))
-        scanned_at_ist = scanned_at.astimezone(ist_timezone)
-        timestamp_ist = scanned_at_ist.strftime("%d-%m-%Y %H:%M:%S")
+        # Convert to IST for Excel and display
+        from utils.timezone_utils import format_excel_datetime, format_excel_date, format_excel_time
+        timestamp_ist = format_excel_datetime(scanned_at)
+        date_ist = format_excel_date(scanned_at)
+        time_ist = format_excel_time(scanned_at)
         
         # Get address from GPS coordinates using TomTom API
         address_info = await tomtom_service.get_address_from_coordinates(device_lat, device_lng)
@@ -243,8 +278,8 @@ async def scan_qr_code(
         try:
             scan_data_for_excel = {
                 "timestamp": timestamp_ist,
-                "date": timestamp_ist.split(' ')[0] if ' ' in timestamp_ist else timestamp_ist,
-                "time": timestamp_ist.split(' ')[1] if ' ' in timestamp_ist else "00:00:00",
+                "date": date_ist,
+                "time": time_ist,
                 "guard_name": guard_name,
                 "guard_email": guard_email,
                 "employee_code": "",  # Guard profile not available in simple version
