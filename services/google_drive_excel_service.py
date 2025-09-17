@@ -169,7 +169,8 @@ FOLDER CONTENTS:
                 # Add title row
                 ws.insert_rows(1)
                 ws['A1'] = f"Guard Scan Report - {area}"
-                ws['B1'] = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+                from utils.timezone_utils import get_current_ist_string
+                ws['B1'] = get_current_ist_string()
                 self._format_title_row(ws)
             
             # Add scan data
