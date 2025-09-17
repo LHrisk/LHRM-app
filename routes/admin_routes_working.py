@@ -134,22 +134,23 @@ async def get_area_wise_excel_reports(
     current_admin: Dict[str, Any] = Depends(get_current_admin),
     days_back: int = Query(7, ge=1, le=30, description="Number of days to include in report"),
     area: Optional[str] = Query(None, description="Specific area/state to filter (optional)"),
-    building_name: Optional[str] = Query(None, description="Name of the building to filter (optional)")
+    site: Optional[str] = Query(None, description="Name of the site to filter (optional)")
 ):
     """
     Generate area-wise Excel reports for all areas or a specific area
     """
     try:
         scan_events_collection = get_scan_events_collection()
-        if scan_events_collection is None:
+        guards_collection = get_guards_collection()  # Get guards collection
+        if scan_events_collection is None or guards_collection is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
             )
 
-        # Calculate date range
-        end_date = datetime.utcnow()
-        start_date = end_date - timedelta(days=days_back)
+        # Calculate date range using IST
+        from utils.timezone_utils import parse_ist_date_range, format_excel_datetime
+        start_date, end_date = parse_ist_date_range(days_back)
 
         # Build base filter for date range
         base_filter = {
@@ -159,41 +160,17 @@ async def get_area_wise_excel_reports(
         # Add area filter if specified (case-insensitive)
         if area:
             base_filter["$or"] = [
-                {"organization": {"$regex": area, "$options": "i"}},
                 {"site": {"$regex": area, "$options": "i"}},
                 {"address": {"$regex": area, "$options": "i"}},
                 {"formatted_address": {"$regex": area, "$options": "i"}}
             ]
 
-        # Add building filter if specified (case-insensitive)
-        if building_name:
-            base_filter["organization"] = {"$regex": building_name, "$options": "i"}
+        # Add site filter if specified (case-insensitive)
+        if site:
+            base_filter["site"] = {"$regex": site, "$options": "i"}
 
         # Fetch scan data
         scans = await scan_events_collection.find(base_filter).to_list(length=None)
-
-        # If no scans found with filters, try a broader search
-        if not scans and (area or building_name):
-            logger.info("No scans found with specific filters, trying broader search")
-            broader_filter = {
-                "scannedAt": {"$gte": start_date, "$lte": end_date}
-            }
-            
-            # Apply less restrictive filtering
-            or_conditions = []
-            if area:
-                or_conditions.extend([
-                    {"organization": {"$regex": area, "$options": "i"}},
-                    {"site": {"$regex": area, "$options": "i"}},
-                    {"address": {"$regex": area, "$options": "i"}},
-                    {"formatted_address": {"$regex": area, "$options": "i"}}
-                ])
-            if building_name:
-                or_conditions.append({"organization": {"$regex": building_name, "$options": "i"}})
-            
-            if or_conditions:
-                broader_filter["$or"] = or_conditions
-                scans = await scan_events_collection.find(broader_filter).to_list(length=None)
 
         if not scans:
             raise HTTPException(
@@ -204,11 +181,28 @@ async def get_area_wise_excel_reports(
         # Group data by area with improved organization and site display
         area_data = {}
         for scan in scans:
-            # Use a combination of address and organization for area grouping
+            # Fetch guard details using guardId
+            guard_id = scan.get("guardId")
+            guard_email = "Unknown Email"
+            guard_phone = "Unknown Phone"
+
+            if guard_id:
+                try:
+                    guard_id = ObjectId(guard_id)
+                    guard = await guards_collection.find_one({"_id": guard_id})
+                    if guard:
+                        guard_email = guard.get("email") if guard and guard.get("email") else None
+                        guard_phone = guard.get("phone") if guard and guard.get("phone") else "Unknown Phone"
+                except Exception as e:
+                    logger.error(f"Error fetching guard details for guardId {guard_id}: {e}")
+
+            # Use guard email if available, otherwise fallback to phone number
+            guard_contact = guard_email if guard_email else guard_phone
+
             area_name = scan.get("formatted_address") or scan.get("address", "Unknown Area")
             organization = scan.get("organization", "Unknown Organization")
-            site = scan.get("site", "Unknown Site")
-            guard_name = scan.get("guardName", scan.get("guardEmail", "Unknown Guard"))
+            site_name = scan.get("site", "Unknown Site")
+            guard_name = scan.get("guardName", "Unknown Guard")
 
             if area_name not in area_data:
                 area_data[area_name] = []
@@ -216,9 +210,9 @@ async def get_area_wise_excel_reports(
             area_data[area_name].append({
                 "timestamp": scan.get("scannedAt"),
                 "organization": organization,
-                "site": site,
+                "site": site_name,
                 "guard_name": guard_name,
-                "guard_email": scan.get("guardEmail", ""),
+                "guard_contact": guard_contact,  # Added contact info
                 "address": area_name,
                 "coordinates": {
                     "lat": scan.get("deviceLat"),
@@ -237,11 +231,10 @@ async def get_area_wise_excel_reports(
             for scan_data in scans:
                 excel_data.append({
                     "Area": area_name,
-                    "Organization": scan_data["organization"],
                     "Site": scan_data["site"],
                     "Guard Name": scan_data["guard_name"],
-                    "Guard Email": scan_data["guard_email"],
-                    "Timestamp": scan_data["timestamp"],
+                    "Guard Contact": scan_data["guard_contact"],
+                    "Timestamp (IST)": format_excel_datetime(scan_data["timestamp"]),
                     "Latitude": scan_data["coordinates"]["lat"],
                     "Longitude": scan_data["coordinates"]["lng"],
                     "Address": scan_data["address"]
@@ -261,8 +254,8 @@ async def get_area_wise_excel_reports(
 
         # Generate filename
         area_suffix = f"_{area.replace(' ', '_')}" if area else "_all_areas"
-        building_suffix = f"_{building_name.replace(' ', '_')}" if building_name else ""
-        filename = f"area_report{area_suffix}{building_suffix}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
+        site_suffix = f"_{site.replace(' ', '_')}" if site else ""
+        filename = f"area_report{area_suffix}{site_suffix}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
         
         headers = {
             "Content-Disposition": f"attachment; filename={filename}"
@@ -278,12 +271,10 @@ async def get_area_wise_excel_reports(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         logger.error(f"Error generating area-wise Excel report: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while generating the area-wise report: {str(e)}"
+            detail=f"Failed to generate Excel report: {str(e)}"
         )
 
 
@@ -291,6 +282,7 @@ async def get_area_wise_excel_reports(
 # ADMIN: Add Supervisor API
 # ============================================================================
 
+# Updated validation to allow either email or phone
 @admin_router.post("/add-supervisor")
 async def add_supervisor(
     supervisor_data: AdminAddSupervisorRequest,
@@ -298,59 +290,50 @@ async def add_supervisor(
 ):
     """
     ADMIN ONLY: Add a new supervisor to the system
-    Creates supervisor account and sends credentials via email
+    Creates supervisor account and sends credentials via email only
     """
     try:
-        users_collection = get_users_collection()
         supervisors_collection = get_supervisors_collection()
-        
-        if users_collection is None or supervisors_collection is None:
+
+        if supervisors_collection is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
             )
-        
+
         admin_id = str(current_admin["_id"])
         admin_name = current_admin.get("name", current_admin.get("email", "Admin"))
-        
-        # Check if user already exists
-        existing_user = await users_collection.find_one({"email": supervisor_data.email})
-        if existing_user:
+
+        # Ensure at least one contact method is provided
+        if not supervisor_data.email and not supervisor_data.phone:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Either email or phone must be provided"
+            )
+
+        # Determine if using email or phone
+        contact_method = "email" if supervisor_data.email else "phone"
+        contact_value = supervisor_data.email if supervisor_data.email else supervisor_data.phone
+
+        # Check if supervisor already exists (check both email and phone)
+        existing_supervisor = await supervisors_collection.find_one({
+            "$or": [
+                {"email": supervisor_data.email},
+                {"phone": supervisor_data.phone}
+            ]
+        })
+
+        if existing_supervisor:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"User with email {supervisor_data.email} already exists"
+                detail=f"Supervisor with {contact_method} {contact_value} already exists"
             )
-        
+
         # Hash the password
         hashed_password = jwt_service.hash_password(supervisor_data.password)
-        
-        # Create user record
-        user_data = {
-            "email": supervisor_data.email,
-            "name": supervisor_data.name,
-            "role": UserRole.SUPERVISOR.value,
-            "passwordHash": hashed_password,
-            "isActive": True,
-            "isEmailVerified": True,  # Auto-verified since created by admin
-            "createdBy": admin_id,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow(),
-            "areaCity": supervisor_data.areaCity
-        }
-        
-        # Insert user
-        user_result = await users_collection.insert_one(user_data)
-        user_id = str(user_result.inserted_id)
-        
-        # Generate supervisor code
-        supervisor_count = await supervisors_collection.count_documents({})
-        supervisor_code = f"SUP{str(supervisor_count + 1).zfill(3)}"
-        
+
         # Create supervisor record
         supervisor_data_record = {
-            "userId": ObjectId(user_id),
-            "code": supervisor_code,
-            "email": supervisor_data.email,
             "name": supervisor_data.name,
             "areaCity": supervisor_data.areaCity,
             "isActive": True,
@@ -358,37 +341,45 @@ async def add_supervisor(
             "createdAt": datetime.utcnow(),
             "updatedAt": datetime.utcnow()
         }
-        
+
+        # Add email or phone to supervisor record
+        if supervisor_data.email:
+            supervisor_data_record["email"] = supervisor_data.email
+        if supervisor_data.phone:
+            supervisor_data_record["phone"] = supervisor_data.phone
+
+        # Generate an incrementing id like sp1, sp2, etc.
+        last_supervisor = await supervisors_collection.find_one(
+            sort=[("id", -1)]  # Sort by id in descending order
+        )
+        if last_supervisor and "id" in last_supervisor:
+            last_id = int(last_supervisor["id"].replace("sp", ""))
+            new_id = f"sp{last_id + 1}"
+        else:
+            new_id = "sp1"
+
+        # Add the new id and required fields to the supervisor record
+        supervisor_data_record["id"] = new_id
+        supervisor_data_record["code"] = new_id  # Use the same value for code field
+        supervisor_data_record["userId"] = new_id  # Use the same value for userId field to avoid duplicate key errors
+
+        # Add the hashed password to the supervisor record
+        supervisor_data_record["passwordHash"] = hashed_password
+
         # Insert supervisor
         supervisor_result = await supervisors_collection.insert_one(supervisor_data_record)
-        supervisor_id = str(supervisor_result.inserted_id)
-        
-        # Send credentials email to supervisor
-        email_sent = await email_service.send_supervisor_credentials_email(
-            to_email=supervisor_data.email,
-            name=supervisor_data.name,
-            password=supervisor_data.password,
-            area_city=supervisor_data.areaCity,
-            admin_name=admin_name
-        )
-        
-        logger.info(f"Admin {admin_name} created supervisor account for {supervisor_data.name} ({supervisor_data.email}) - Area: {supervisor_data.areaCity}")
-        
+
+        # Construct response with the new id
         return {
             "message": "Supervisor added successfully",
             "supervisor": {
-                "id": supervisor_id,
-                "userId": user_id,
-                "code": supervisor_code,
+                "id": new_id,
                 "name": supervisor_data.name,
                 "email": supervisor_data.email,
+                "phone": supervisor_data.phone,
                 "areaCity": supervisor_data.areaCity,
-                "createdBy": admin_id,
-                "adminName": admin_name,
-                "createdAt": datetime.utcnow().isoformat()
-            },
-            "credentials_sent": email_sent,
-            "note": "Supervisor has been created and credentials sent via email. Supervisor can change password using /auth/reset-password endpoint."
+                "adminName": admin_name
+            }
         }
         
     except HTTPException:
@@ -402,75 +393,155 @@ async def add_supervisor(
 
 
 # ============================================================================
-# ADMIN: Delete Supervisor API
+# ADMIN: List Supervisors API
 # ============================================================================
 
-@admin_router.delete("/delete-supervisor")
-async def delete_supervisor(
-    name: str,
-    email: str,
-    area: str,
-    current_admin: Dict[str, Any] = Depends(get_current_admin)
+@admin_router.get("/supervisors")
+async def list_supervisors(
+    current_admin: Dict[str, Any] = Depends(get_current_admin),
+    area_city: Optional[str] = Query(None, description="Filter by area/city")
 ):
     """
-    ADMIN ONLY: Delete a supervisor from the system by name, email and area
-    Removes supervisor from both supervisors and users collections
+    ADMIN ONLY: List all supervisors in the system
+    Supports filtering by area/city
     """
     try:
-        users_collection = get_users_collection()
         supervisors_collection = get_supervisors_collection()
         
-        if users_collection is None or supervisors_collection is None:
+        if supervisors_collection is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
             )
         
-        # Find supervisor by name, email and area
-        supervisor = await supervisors_collection.find_one({
-            "name": name,
-            "email": email,
-            "areaCity": area
-        })
+        # Build query filter
+        query_filter = {}
         
+        if area_city:
+            query_filter["areaCity"] = {"$regex": area_city, "$options": "i"}  # Case-insensitive search
+        
+        # Get supervisors
+        supervisors_cursor = supervisors_collection.find(query_filter).sort("createdAt", -1)
+        
+        supervisors = []
+        async for supervisor in supervisors_cursor:
+            supervisor_data = {
+                "id": supervisor.get("id", str(supervisor["_id"])),
+                "name": supervisor["name"],
+                "email": supervisor.get("email"),
+                "phone": supervisor.get("phone"),
+                "areaCity": supervisor["areaCity"],
+                "isActive": supervisor.get("isActive", True),
+                "createdAt": supervisor.get("createdAt"),
+                "updatedAt": supervisor.get("updatedAt"),
+                "lastLogin": supervisor.get("lastLogin"),
+                "code": supervisor.get("code"),
+                "userId": supervisor.get("userId")
+            }
+            supervisors.append(supervisor_data)
+        
+        return {
+            "supervisors": supervisors,
+            "filters": {
+                "area_city": area_city
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing supervisors: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list supervisors: {str(e)}"
+        )
+
+
+# ============================================================================
+# ADMIN: Delete Supervisor API
+# ============================================================================
+
+# Fixed the search criteria to match the database field names
+@admin_router.delete("/delete-supervisor")
+async def delete_supervisor(
+    name: str,
+    area: str,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    current_admin: Dict[str, Any] = Depends(get_current_admin)
+):
+    """
+    ADMIN ONLY: Delete a supervisor from the system by name, area and (email OR phone)
+    Removes supervisor from the supervisors collection only
+    """
+    try:
+        # Validate that either email or phone is provided
+        if not email and not phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either email or phone number must be provided"
+            )
+
+        supervisors_collection = get_supervisors_collection()
+
+        if supervisors_collection is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+
+        # Clean inputs
+        name = name.strip()
+        area = area.strip()
+        contact_value = email.strip() if email else phone.strip()
+        contact_type = "email" if email else "phone"
+
+        # Build search criteria
+        search_criteria = {
+            "name": name,
+            "areaCity": area  # Corrected to match the database field name
+        }
+
+        if email:
+            search_criteria["email"] = email
+
+        # For phone search, check both phoneNumber and phone_number fields
+        if phone:
+            phone_digits = ''.join(filter(str.isdigit, phone))
+            search_criteria = {
+                "name": name,
+                "areaCity": area,  # Corrected to match the database field name
+                "$or": [
+                    {"phone": phone},
+                    {"phone": phone_digits}
+                ]
+            }
+
+        # Find supervisor by name, area and contact
+        supervisor = await supervisors_collection.find_one(search_criteria)
+
         if not supervisor:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Supervisor with name '{name}', email '{email}', and area '{area}' not found"
+                detail=f"Supervisor with name '{name}', area '{area}', and {contact_type} '{contact_value}' not found"
             )
-        
+
         supervisor_id = str(supervisor["_id"])
-        
+
         # Delete from supervisors collection
         supervisor_result = await supervisors_collection.delete_one({"_id": supervisor["_id"]})
-        
-        # Delete from users collection if userId exists
-        user_result = None
-        if supervisor.get("userId"):
-            user_result = await users_collection.delete_one({"_id": supervisor["userId"]})
-        
-        # Send email notification to the supervisor
-        admin_name = current_admin.get("name", current_admin.get("email", "System Administrator"))
-        email_sent = await email_service.send_account_removal_email(
-            to_email=email,
-            name=name,
-            role="Field Officer",  # Using the new terminology
-            removed_by=admin_name
-        )
-        
-        logger.info(f"Admin {current_admin.get('email')} deleted supervisor {supervisor_id} ({name}, {email}, {area})")
-        
+
+        logger.info(f"Admin {current_admin.get('email')} deleted supervisor {supervisor_id} ({name}, {contact_type}: {contact_value}, {area})")
+
         return {
             "message": "Supervisor deleted successfully",
             "supervisor_id": supervisor_id,
             "name": name,
-            "email": email,
             "area": area,
-            "user_deleted": user_result.deleted_count > 0 if user_result else False,
-            "email_sent": email_sent,
-            "note": "Supervisor has been removed from the system and notification email sent"
+            "deleted_by": contact_type,
+            "contact_used": contact_value
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
