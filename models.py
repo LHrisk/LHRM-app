@@ -3,7 +3,7 @@ Pydantic models for the Guard Management System
 Updated for Email-OTP authentication with JWT and role-based access
 """
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator, ConfigDict
 from typing import List, Optional, Dict, Any, Annotated
 from datetime import datetime
 from enum import Enum
@@ -158,11 +158,17 @@ class GuardResponse(GuardBase):
 # QR Location Models
 class QRLocationBase(BaseModel):
     """Base QR location model"""
-    supervisorId: str = Field(..., description="Owner supervisor ID")
+    supervisorId: ObjectId = Field(..., description="Owner supervisor ID")
+    site: str = Field(..., description="Site name created by the supervisor")
     label: str = Field(..., description="Human-readable label")
     lat: float = Field(..., ge=-90, le=90, description="Registered latitude")
     lng: float = Field(..., ge=-180, le=180, description="Registered longitude")
     active: bool = Field(True, description="QR location active status")
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str}
+    )
 
 
 class QRLocationCreate(QRLocationBase):
@@ -456,18 +462,165 @@ class QRCodePublicScanRequest(BaseModel):
 
 class QRCodePublicScanResponse(BaseModel):
     """Public QR scan response"""
-    scanEventId: str = Field(..., description="Scan event ID")
-    success: bool = Field(..., description="Scan success status")
-    qrId: str = Field(..., description="QR code identifier")
-    locationName: str = Field(..., description="Location name")
-    isWithinRadius: bool = Field(..., description="Whether scan was within allowed radius")
-    distanceFromQR: float = Field(..., description="Distance from QR location in meters")
-    radiusLimit: float = Field(..., description="Allowed radius limit in meters")
-    address: str = Field(..., description="Current address from TomTom")
-    scannedAt: datetime = Field(..., description="Scan timestamp")
-    message: str = Field(..., description="Scan result message")
-    guardName: str = Field(..., description="Guard name")
-    areaCity: str = Field(..., description="Area city")
+    message: str
+    qr_id: str
+    building: str
+    site: str
+    scanned_at: str
+    coordinates: Dict[str, float]
+
+
+# ============================================================================
+# NEW MODELS FOR PHONE/EMAIL SUPPORT
+# ============================================================================
+
+class ContactMethod(str, Enum):
+    """Contact method enum"""
+    EMAIL = "email"
+    PHONE = "phone"
+
+
+class SupervisorCreateFlexibleRequest(BaseModel):
+    """Flexible supervisor creation request supporting email or phone"""
+    name: str = Field(..., min_length=2, max_length=100, description="Full name")
+    password: str = Field(..., min_length=8, description="Password (min 8 characters)")
+    areaCity: str = Field(..., description="Area/City assignment")
+    contact_method: ContactMethod = Field(..., description="Contact method (email or phone)")
+    email: Optional[EmailStr] = Field(None, description="Email address (required if contact_method is email)")
+    phone_number: Optional[str] = Field(None, description="Phone number with country code (required if contact_method is phone)")
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.EMAIL and not v:
+            raise ValueError('Email is required when contact_method is email')
+        return v
+
+    @field_validator('phone_number')
+    @classmethod
+    def validate_phone_number(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.PHONE and not v:
+            raise ValueError('Phone number is required when contact_method is phone')
+        if v and not v.startswith('+'):
+            raise ValueError('Phone number must include country code (e.g., +91)')
+        return v
+
+
+class GuardCreateFlexibleRequest(BaseModel):
+    """Flexible guard creation request supporting email or phone"""
+    name: str = Field(..., min_length=2, max_length=100, description="Full name")
+    password: str = Field(..., min_length=8, description="Password (min 8 characters)")
+    contact_method: ContactMethod = Field(..., description="Contact method (email or phone)")
+    email: Optional[EmailStr] = Field(None, description="Email address (required if contact_method is email)")
+    phone_number: Optional[str] = Field(None, description="Phone number with country code (required if contact_method is phone)")
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.EMAIL and not v:
+            raise ValueError('Email is required when contact_method is email')
+        return v
+
+    @field_validator('phone_number')
+    @classmethod
+    def validate_phone_number(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.PHONE and not v:
+            raise ValueError('Phone number is required when contact_method is phone')
+        if v and not v.startswith('+'):
+            raise ValueError('Phone number must include country code (e.g., +91)')
+        return v
+
+
+class QRAssignmentRequest(BaseModel):
+    """Request to assign/unassign guard to QR code"""
+    qr_id: str = Field(..., description="QR code ID")
+    guard_id: Optional[str] = Field(None, description="Guard ID to assign (null to unassign)")
+
+
+class QRAssignmentResponse(BaseModel):
+    """Response for QR code assignment"""
+    message: str
+    qr_id: str
+    guard_id: Optional[str] = None
+    guard_name: Optional[str] = None
+
+
+class BuildingListResponse(BaseModel):
+    """Response for building list"""
+    buildings: List[Dict[str, Any]]
+    total: int
+    page: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+
+
+class GuardListResponse(BaseModel):
+    """Response for guard list"""
+    guards: List[Dict[str, Any]]
+    total: int
+    page: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+    filters_applied: Dict[str, Any]
+
+
+class QRListResponse(BaseModel):
+    """Response for QR codes list"""
+    qr_codes: List[Dict[str, Any]]
+    total: int
+
+
+class FlexibleLoginRequest(BaseModel):
+    """Login request supporting email or phone"""
+    contact_method: ContactMethod = Field(..., description="Contact method (email or phone)")
+    email: Optional[EmailStr] = Field(None, description="Email address")
+    phone_number: Optional[str] = Field(None, description="Phone number")
+    password: str = Field(..., description="Password")
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.EMAIL and not v:
+            raise ValueError('Email is required when contact_method is email')
+        return v
+
+    @field_validator('phone_number')
+    @classmethod
+    def validate_phone_number(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.PHONE and not v:
+            raise ValueError('Phone number is required when contact_method is phone')
+        return v
+
+
+class FlexibleOTPRequest(BaseModel):
+    """OTP request supporting email or phone"""
+    contact_method: ContactMethod = Field(..., description="Contact method (email or phone)")
+    email: Optional[EmailStr] = Field(None, description="Email address")
+    phone_number: Optional[str] = Field(None, description="Phone number")
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.EMAIL and not v:
+            raise ValueError('Email is required when contact_method is email')
+        return v
+
+    @field_validator('phone_number')
+    @classmethod
+    def validate_phone_number(cls, v, info):
+        if info.data.get('contact_method') == ContactMethod.PHONE and not v:
+            raise ValueError('Phone number is required when contact_method is phone')
+        return v
+
+
+class NotificationResponse(BaseModel):
+    """Response for notification sending"""
+    success: bool
+    method: str  # "email" or "sms"
+    message: str
+    details: Optional[Dict[str, Any]] = None
 
 
 class QRCodeGenerateRequest(BaseModel):
@@ -563,100 +716,106 @@ class SupervisorResponse(BaseModel):
 
 class AdminAddSupervisorRequest(BaseModel):
     """Model for admin adding a new supervisor"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "Vinayak Gupta",
+                "email": "",
+                "phone": "",
+                "password": "Test@123",
+                "areaCity": "Delhi"
+            }
+        }
+    )
+    
     name: str = Field(..., min_length=2, max_length=100, description="Supervisor's full name")
-    email: EmailStr = Field(..., description="Supervisor's email address")
+    email: Optional[str] = Field(
+        default=None, 
+        description="Supervisor's email address (optional - provide either email or phone)"
+    )
+    phone: Optional[str] = Field(
+        default=None, 
+        description="Supervisor's phone number (optional - provide either email or phone)"
+    )
     password: str = Field(..., min_length=6, max_length=50, description="Supervisor's initial password")
     areaCity: str = Field(..., min_length=2, max_length=100, description="Area/City to supervise")
-    
+
+    @model_validator(mode='after')
+    def validate_contact_method(self):
+        """Ensure either email or phone is provided"""
+        # Treat empty strings as None
+        email = self.email.strip() if self.email else None
+        phone = self.phone.strip() if self.phone else None
+        
+        if not email and not phone:
+            raise ValueError("Either email or phone number must be provided")
+        
+        # Update the fields to clean values
+        self.email = email if email else None
+        self.phone = phone if phone else None
+        return self
+
     @field_validator('email')
     @classmethod
-    def validate_supervisor_email(cls, v: str) -> str:
+    def validate_supervisor_email(cls, v: Optional[str]) -> Optional[str]:
         """Validate supervisor email format"""
-        return v.lower()
+        if v:
+            v = v.strip()
+            # Treat empty string as None
+            if not v:
+                return None
+            if "@" not in v:
+                raise ValueError("value is not a valid email address: An email address must have an @-sign.")
+            return v.lower()
+        return v
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        """Validate phone number format"""
+        if v:
+            v = v.strip()
+            # Treat empty string as None
+            if not v:
+                return None
+            # Remove non-digits and validate format
+            digits_only = ''.join(filter(str.isdigit, v))
+            if len(digits_only) != 10:
+                raise ValueError("Phone number must be exactly 10 digits")
+            return digits_only
+        return v
+        if v:
+            # Remove non-digits and validate format
+            digits_only = ''.join(filter(str.isdigit, v))
+            if len(digits_only) != 10:
+                raise ValueError("Phone number must be exactly 10 digits")
+            return digits_only
+        return v
 
 
 class SupervisorAddGuardRequest(BaseModel):
-    """Model for supervisor adding a new guard"""
+    """
+    Request model for adding a guard by a supervisor
+    """
     name: str = Field(..., min_length=2, max_length=100, description="Guard's full name")
-    email: EmailStr = Field(..., description="Guard's email address")
-    password: str = Field(..., min_length=6, max_length=50, description="Guard's initial password")
-    
-    @field_validator('email')
+    email: Optional[str] = Field(
+        "",
+        description="Guard's email address (optional, default empty, no validation if empty)"
+    )
+    phone: Optional[str] = Field(
+        "",
+        description="Guard's phone number (optional, must be 10 digits if provided, default empty)"
+    )
+
+    @field_validator("phone")
     @classmethod
-    def validate_guard_email(cls, v: str) -> str:
-        """Validate guard email format"""
-        return v.lower()
+    def validate_phone(cls, v):
+        if v:
+            # Validate only if phone is not empty
+            if not v.isdigit() or len(v) != 10:
+                raise ValueError("Phone number must be exactly 10 digits")
+        return v
 
-
-class GuardCreate(BaseModel):
-    """Guard creation model for new system"""
-    email: EmailStr = Field(..., description="Email address")
-    name: str = Field(..., min_length=2, max_length=100, description="Full name")
-    supervisorId: str = Field(..., description="Supervisor ID")
-    shift: str = Field(..., description="Shift information")
-    phoneNumber: str = Field(..., description="Phone number")
-    emergencyContact: str = Field(..., description="Emergency contact")
-    
-    @field_validator('email')
-    @classmethod
-    def validate_guard_email(cls, v: str) -> str:
-        """Validate guard email format: must end with @lh.io.in"""
-        if not v.endswith('@lh.io.in'):
-            raise ValueError('Guard email must end with @lh.io.in')
-        return v.lower()
-
-
-class GuardResponse(BaseModel):
-    """Guard response model for new system"""
-    id: str = Field(..., description="Guard ID")
-    userId: str = Field(..., description="User ID")
-    supervisorId: str = Field(..., description="Supervisor ID")
-    email: EmailStr = Field(..., description="Email")
-    name: str = Field(..., description="Name")
-    areaCity: str = Field(..., description="Area city")
-    shift: str = Field(..., description="Shift information")
-    phoneNumber: str = Field(..., description="Phone number")
-    emergencyContact: str = Field(..., description="Emergency contact")
-    isActive: bool = Field(..., description="Active status")
-    createdAt: datetime = Field(..., description="Creation timestamp")
-    updatedAt: datetime = Field(..., description="Last update timestamp")
-
-
-class AreaReportRequest(BaseModel):
-    """Area report request"""
-    startDate: datetime = Field(..., description="Report start date")
-    endDate: datetime = Field(..., description="Report end date")
-    areaCity: Optional[str] = Field(None, description="Filter by area city")
-
-
-class ScanReportResponse(BaseModel):
-    """Scan report response"""
-    guardName: str = Field(..., description="Guard name")
-    guardEmail: EmailStr = Field(..., description="Guard email")
-    areaCity: str = Field(..., description="Area city")
-    locationName: str = Field(..., description="Location name")
-    scannedAt: datetime = Field(..., description="Scan timestamp")
-    coordinates: Coordinates = Field(..., description="Scan coordinates")
-    address: str = Field(..., description="Scan address")
-    isWithinRadius: bool = Field(..., description="Within radius status")
-    distanceFromQR: float = Field(..., description="Distance from QR location")
-
-
-class SystemConfig(BaseModel):
-    """System configuration model"""
-    within_radius_meters: float = Field(..., description="Radius for scan validation")
-    otp_expire_minutes: int = Field(..., description="OTP expiration minutes")
-    access_token_expire_minutes: int = Field(..., description="Access token expiration")
-    refresh_token_expire_days: int = Field(..., description="Refresh token expiration")
-    max_otp_attempts: int = Field(..., description="Maximum OTP attempts")
-
-
-class SystemConfigUpdate(BaseModel):
-    """System configuration update model"""
-    within_radius_meters: Optional[float] = Field(None, ge=1.0, le=1000.0)
-    otp_expire_minutes: Optional[int] = Field(None, ge=1, le=60)
-    access_token_expire_minutes: Optional[int] = Field(None, ge=5, le=1440)
-    refresh_token_expire_days: Optional[int] = Field(None, ge=1, le=30)
-    max_otp_attempts: Optional[int] = Field(None, ge=1, le=10)
+    password: str = Field(..., min_length=8, description="Password for the guard (min 8 characters)")
 
 
