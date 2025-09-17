@@ -37,37 +37,204 @@ supervisor_router = APIRouter()
 # ============================================================================
 from fastapi import Body
 
-@supervisor_router.post("/building/add")
-async def add_building(
-    building_name: str = Body(..., embed=True, description="Name of the new building to add."),
+@supervisor_router.post("/site/add")
+async def add_site(
+    site: str = Body(..., embed=True, description="Site name to be added by the supervisor"),
     current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)
 ):
     """
-    Supervisor-only: Add a new building to the system. Sites and QR codes are handled separately.
+    Supervisor-only: Add a new site to the system.
+    Sites and QR codes are handled separately.
     """
     qr_locations_collection = get_qr_locations_collection()
+
     if qr_locations_collection is None:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Check if building already exists for this supervisor
-    existing = await qr_locations_collection.find_one({
-        "organization": building_name,
-        "supervisorId": current_supervisor["_id"]
-    })
-    if existing:
-        raise HTTPException(status_code=400, detail="Building already exists for this supervisor")
+    # Normalize site name and convert supervisorId to ObjectId
+    normalized_site = site.strip()
+    supervisor_id = ObjectId(current_supervisor["_id"]) if not isinstance(current_supervisor["_id"], ObjectId) else current_supervisor["_id"]
 
-    # Add building record (no site field)
-    building_data = {
-        "organization": building_name,
+    # Debug logs
+    print(f"Normalized site: {normalized_site}")
+    print(f"Supervisor ID: {supervisor_id}")
+
+    # Check if site already exists
+    existing_site = await qr_locations_collection.find_one({
+        "site": {"$regex": f"^{normalized_site}$", "$options": "i"},  # Match site
+        "supervisorId": supervisor_id
+    })
+
+    print(f"Existing site query result: {existing_site}")
+
+    if existing_site:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Site already exists."
+        )
+
+    # Add new site
+    site_data = {
+        "site": normalized_site,  # Save site
         "createdBy": str(current_supervisor["_id"]),
         "createdAt": datetime.now(),
+        "updatedAt": datetime.now(),
         "supervisorId": current_supervisor["_id"]
     }
-    result = await qr_locations_collection.insert_one(building_data)
-    building_id = str(result.inserted_id)
 
-    return {"building_id": building_id, "organization": building_name, "message": "Building added successfully. Add sites and generate QR codes using the QR code API."}
+    result = await qr_locations_collection.insert_one(site_data)
+
+    return {
+        "message": "Site added successfully",
+        "siteId": str(result.inserted_id)
+    }
+
+
+# ============================================================================
+# NEW: Supervisor List Buildings API
+# ============================================================================
+@supervisor_router.get("/sites")
+async def list_sites(
+    current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)
+):
+    """
+    SUPERVISOR ONLY: List all sites created by the current supervisor
+    Automatically shows all sites with total count
+    """
+    try:
+        qr_locations_collection = get_qr_locations_collection()
+        if qr_locations_collection is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+
+        supervisor_id = current_supervisor["_id"]
+
+        # Get all distinct sites for this supervisor
+        pipeline = [
+            {"$match": {"supervisorId": supervisor_id}},
+            {"$group": {
+                "_id": "$organization",
+                "site_name": {"$first": "$organization"},
+                "created_at": {"$min": "$createdAt"},
+                "qr_count": {"$sum": 1},
+                "sites": {"$addToSet": "$site"}
+            }},
+            {"$sort": {"created_at": -1}}
+        ]
+        
+        sites_cursor = qr_locations_collection.aggregate(pipeline)
+        sites = await sites_cursor.to_list(length=None)
+
+        # Total count is simply the length of sites list
+        total = len(sites)
+
+        # Format response
+        formatted_sites = []
+        for site in sites:
+            # Clean up sites list (remove None values)
+            sites_list = [s for s in site.get("sites", []) if s is not None]
+            
+            formatted_sites.append({
+                "site_name": site["site_name"],
+                "created_at": site["created_at"].isoformat() if site.get("created_at") else None,
+                "qr_locations_count": site.get("qr_count", 0),
+                "sites_count": len(sites_list),
+                "sites": sites_list
+            })
+
+        return {
+            "sites": formatted_sites,
+            "total_sites": total,
+            "message": f"Found {total} sites created by you"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing sites: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list sites: {str(e)}"
+        )
+
+
+# ============================================================================
+# NEW: Supervisor List Guards API
+# ============================================================================
+@supervisor_router.get("/guards")
+async def list_guards(
+    current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)
+):
+    """
+    SUPERVISOR ONLY: List all guards under the current supervisor
+    Automatically shows all guards (active and inactive) with total count
+    """
+    try:
+        guards_collection = get_guards_collection()
+        
+        if guards_collection is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+        
+        supervisor_id = current_supervisor["_id"]
+        
+        # Build match filter for guards under this supervisor
+        # Try both string and ObjectId formats for supervisorId
+        guards_filter = {
+            "$or": [
+                {"supervisorId": str(supervisor_id)},
+                {"supervisorId": supervisor_id}
+            ]
+        }
+        
+        # Find all guards for this supervisor
+        guards_cursor = guards_collection.find(guards_filter).sort("createdAt", -1)
+        guards_data = await guards_cursor.to_list(length=None)
+        
+        # Format the response
+        guards = []
+        for guard in guards_data:
+            guard_info = {
+                "guard_id": str(guard["_id"]),
+                "guard_internal_id": guard.get("guardId", ""),
+                "name": guard.get("name", ""),
+                "email": guard.get("email", ""),
+                "phone": guard.get("phone", ""),
+                "area_city": guard.get("areaCity", ""),
+                "is_active": guard.get("isActive", True),
+                "created_at": guard.get("createdAt"),
+                "created_by": guard.get("createdBy", ""),
+                "supervisor_id": guard.get("supervisorId", "")
+            }
+            guards.append(guard_info)
+        
+        # Count totals
+        total_guards = len(guards)
+        
+        # Format dates for response
+        for guard in guards:
+            if guard.get("created_at"):
+                if hasattr(guard["created_at"], 'isoformat'):
+                    guard["created_at"] = guard["created_at"].isoformat()
+        
+        return {
+            "guards": guards,
+            "total_guards": total_guards
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing guards: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list guards: {str(e)}"
+        )
+
 
     # --- The following code should be inside get_supervisor_dashboard, not add_building ---
 
@@ -260,9 +427,9 @@ async def generate_excel_report(
                 detail="Database not available"
             )
 
-        # Calculate date range
-        end_date = datetime.utcnow()
-        start_date = end_date - timedelta(days=days_back)
+        # Calculate date range using IST
+        from utils.timezone_utils import parse_ist_date_range, format_excel_datetime
+        start_date, end_date = parse_ist_date_range(days_back)
         
         # Build query filter
         supervisor_id = current_supervisor["_id"]
@@ -282,8 +449,8 @@ async def generate_excel_report(
         }
 
         if building_name:
-            # Case-insensitive search for building name
-            query_filter["organization"] = {"$regex": building_name, "$options": "i"}
+            # Case-insensitive search for site name
+            query_filter["site"] = {"$regex": building_name, "$options": "i"}
 
         # Filter scans by supervisor's area and date range
         scans = await scan_events_collection.find(query_filter).to_list(length=None)
@@ -327,40 +494,60 @@ async def generate_excel_report(
         # Debug: Log all scan events found by query
         logger.info(f"Total scan events found: {len(scans)}")
         
-        # Prepare Excel data
+        # Fetch guard details from the guards collection
+        guards_collection = get_guards_collection()
+        if guards_collection is None:
+            logger.error("Guards collection is None")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+
+        # Prepare Excel data with IST timezone conversion
         excel_data = []
         for scan in scans:
             try:
-                date_time = scan["scannedAt"].strftime("%Y-%m-%d %H:%M:%S") if hasattr(scan["scannedAt"], "strftime") else str(scan["scannedAt"])
-                building = scan.get("organization", "Unknown Organization")
+                # Convert guardId to ObjectId for querying the guards collection
+                from bson import ObjectId
+                guard_id = scan.get("guardId")
+                if guard_id:
+                    try:
+                        guard_id = ObjectId(guard_id)
+                    except Exception as e:
+                        logger.error(f"Invalid guardId format: {guard_id}, Error: {e}")
+                        guard_id = None
+
+                # Fetch guard details using guardId
+                guard = await guards_collection.find_one({"_id": guard_id}) if guard_id else None
+                guard_phone = guard.get("phone") if guard else "Unknown Phone"
+
+                # Convert UTC to IST for display
+                date_time = format_excel_datetime(scan.get("scannedAt"))
                 site = scan.get("site", "Unknown Site")
-                
+
                 # Handle different guard name fields from different endpoints
                 guard_name = scan.get("guardName") or scan.get("guard_name") or "Unknown Guard"
-                
-                # Include scan source information for debugging
-                scan_source = "/guard/scan" if scan.get("guardId") else "/qr/scan"
-                
-                logger.info(f"Processing scan: Building={building}, Site={site}, Guard={guard_name}, Source={scan_source}")
-                
+
+                # Use guard email if available, otherwise fallback to phone number
+                guard_contact = scan.get("guardEmail") or guard_phone
+
                 row_data = {
-                    "Date + Time": date_time,
+                    "Date + Time (IST)": date_time,
                     "Action": "QR Code Scan",
-                    "Building Name": building,
                     "Site Name": site,
                     "Guard Name": guard_name,
-                    "Scan Source": scan_source,
-                    "Guard Email": scan.get("guardEmail", ""),
-                    "QR ID": scan.get("qrId", ""),
-                    "Address": scan.get("address", f"Lat: {scan.get('deviceLat', '')}, Lng: {scan.get('deviceLng', '')}"),
-                    "Formatted Address": scan.get("formatted_address", ""),
-                    "Latitude": scan.get("deviceLat", ""),
-                    "Longitude": scan.get("deviceLng", "")
+                    "Guard Contact": guard_contact,  # Added contact info
+                    "Latitude": scan.get("deviceLat"),
+                    "Longitude": scan.get("deviceLng"),
+                    "Address": scan.get("address", "Unknown Address"),
+                    "Formatted Address": scan.get("formatted_address", "Unknown Formatted Address"),
+                    "Scan Source": scan.get("scanSource", "Unknown Source"),
                 }
+
                 excel_data.append(row_data)
-                
+
             except Exception as e:
-                logger.error(f"Error processing scan event: {e}, scan: {scan}")
+                logger.error(f"Error processing scan: {e}")
                 continue
 
         if not excel_data:
@@ -411,104 +598,70 @@ async def add_guard(
 ):
     """
     SUPERVISOR ONLY: Add a new guard to the system
-    Creates guard account and sends credentials via email
+    Creates guard account and saves data only in the guards collection.
     """
     try:
-        users_collection = get_users_collection()
         guards_collection = get_guards_collection()
-        
-        if users_collection is None or guards_collection is None:
+
+        if guards_collection is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
             )
-        
+
         supervisor_id = str(current_supervisor["_id"])
         supervisor_name = current_supervisor.get("name", current_supervisor.get("email", "Supervisor"))
         supervisor_area = current_supervisor.get("areaCity", "Unknown")
-        
-        # Check if user already exists
-        existing_user = await users_collection.find_one({"email": guard_data.email})
-        if existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"User with email {guard_data.email} already exists"
-            )
-        
+
+        # Generate a simple guard ID
+        guard_count = await guards_collection.count_documents({})
+        guard_id = f"guard_{guard_count + 1}"
+
         # Hash the password
         hashed_password = jwt_service.hash_password(guard_data.password)
-        
-        # Create user record
-        user_data = {
-            "email": guard_data.email,
+
+        # Generate a unique employee code
+        employee_code = f"EMP-{guard_count + 1:05d}"  # Example: EMP-00001
+
+        # Generate a unique user ID
+        user_id = f"user_{guard_count + 1}"  # Example: user_1
+
+        # Create guard record
+        guard_data_record = {
+            "guardId": guard_id,
+            "supervisorId": supervisor_id,
             "name": guard_data.name,
-            "role": UserRole.GUARD.value,
-            "passwordHash": hashed_password,
+            "email": guard_data.email,
+            "phone": guard_data.phone,
+            "passwordHash": hashed_password,  # Store hashed password
+            "areaCity": supervisor_area,
             "isActive": True,
-            "isEmailVerified": True,  # Auto-verified since created by supervisor
             "createdBy": supervisor_id,
             "createdAt": datetime.utcnow(),
             "updatedAt": datetime.utcnow(),
-            "areaCity": supervisor_area,
-            "supervisorId": supervisor_id
+            "employeeCode": employee_code,  # Add unique employee code
+            "userId": user_id  # Add unique user ID
         }
-        
-        # Insert user
-        user_result = await users_collection.insert_one(user_data)
-        user_id = str(user_result.inserted_id)
-        
-        # Generate employee code for guard
-        guard_count = await guards_collection.count_documents({})
-        employee_code = f"GRD{str(guard_count + 1).zfill(3)}"
-        
-        # Create guard record
-        guard_data_record = {
-            "userId": ObjectId(user_id),
-            "supervisorId": ObjectId(supervisor_id),
-            "employeeCode": employee_code,
-            "email": guard_data.email,
-            "name": guard_data.name,
-            "areaCity": supervisor_area,
-            "shift": "Day Shift",  # Default shift
-            "phoneNumber": "",  # Can be updated later
-            "emergencyContact": "",  # Can be updated later
-            "isActive": True,
-            "createdBy": supervisor_id,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
-        }
-        
-        # Insert guard
-        guard_result = await guards_collection.insert_one(guard_data_record)
-        guard_id = str(guard_result.inserted_id)
-        
-        # Send credentials email to guard
-        email_sent = await email_service.send_guard_credentials_email(
-            to_email=guard_data.email,
-            name=guard_data.name,
-            password=guard_data.password,
-            supervisor_name=supervisor_name
-        )
-        
-        logger.info(f"Supervisor {supervisor_name} created guard account for {guard_data.name} ({guard_data.email})")
-        
+
+        # Insert guard into the guards collection
+        await guards_collection.insert_one(guard_data_record)
+
+        logger.info(f"Supervisor {supervisor_name} created guard account for {guard_data.name}")
+
         return {
             "message": "Guard added successfully",
             "guard": {
                 "id": guard_id,
-                "userId": user_id,
-                "employeeCode": employee_code,
                 "name": guard_data.name,
                 "email": guard_data.email,
+                "phone": guard_data.phone,
                 "areaCity": supervisor_area,
                 "supervisorId": supervisor_id,
                 "supervisorName": supervisor_name,
                 "createdAt": datetime.utcnow().isoformat()
-            },
-            "credentials_sent": email_sent,
-            "note": "Guard has been created and credentials sent via email. Guard can change password using /auth/reset-password endpoint."
+            }
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -526,91 +679,105 @@ async def add_guard(
 @supervisor_router.delete("/delete-guard")
 async def delete_guard(
     name: str,
-    email: str,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
     current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)
 ):
     """
-    SUPERVISOR ONLY: Delete a guard from the system by name and email
+    SUPERVISOR ONLY: Delete a guard from the system by name and (email OR phone)
     Removes guard from both guards and users collections
     """
     try:
+        # Validate that either email or phone is provided
+        if not email and not phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either email or phone number must be provided"
+            )
+
         users_collection = get_users_collection()
         guards_collection = get_guards_collection()
-        
+
         if users_collection is None or guards_collection is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
             )
-        
+
         # Verify the guard belongs to this supervisor
-        supervisor_id = str(current_supervisor["_id"])
+        supervisor_id = current_supervisor["_id"]
+
+        # Normalize inputs - be more careful with phone normalization
+        name_normalized = name.strip()
         
-        # First, let's check if any guard exists with this name and email (regardless of supervisor)
-        any_guard = await guards_collection.find_one({
-            "name": name.strip(),  # Remove any trailing spaces
-            "email": email.strip()
-        })
-        
-        if not any_guard:
-            # Check for similar names (case-insensitive)
-            similar_guard = await guards_collection.find_one({
-                "name": {"$regex": f"^{name.strip()}$", "$options": "i"},
-                "email": {"$regex": f"^{email.strip()}$", "$options": "i"}
-            })
-            
-            if not similar_guard:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"No guard found with name '{name.strip()}' and email '{email.strip()}' in the system"
-                )
-        
-        # Find guard by name and email that belongs to this supervisor
-        guard = await guards_collection.find_one({
-            "name": name.strip(),  # Remove any trailing spaces
-            "email": email.strip(),
-            "supervisorId": ObjectId(supervisor_id)
-        })
-        
-        if not guard:
-            # The guard exists but doesn't belong to this supervisor
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Guard with name '{name.strip()}' and email '{email.strip()}' exists but does not belong to your supervision"
-            )
-        
-        guard_id = str(guard["_id"])
-        user_id = guard.get("userId")
-        
-        # Delete from guards collection
-        guard_result = await guards_collection.delete_one({"_id": guard["_id"]})
-        
-        # Delete from users collection if userId exists
-        user_result = None
-        if user_id:
-            user_result = await users_collection.delete_one({"_id": user_id})
-        
-        # Send email notification to the guard
-        supervisor_name = current_supervisor.get("name", current_supervisor.get("email", "Your supervisor"))
-        email_sent = await email_service.send_account_removal_email(
-            to_email=email,
-            name=name,
-            role="Guard",
-            removed_by=supervisor_name
-        )
-        
-        logger.info(f"Supervisor {supervisor_id} deleted guard {guard_id} ({name}, {email})")
-        
-        return {
-            "message": "Guard deleted successfully",
-            "guard_id": guard_id,
-            "name": name,
-            "email": email,
-            "user_deleted": user_result.deleted_count > 0 if user_result else False,
-            "email_sent": email_sent,
-            "note": "Guard has been removed from the system and notification email sent"
+        # Build search criteria
+        search_criteria = {
+            "name": name_normalized,  # Exact match for name
+            "$or": [
+                {"supervisorId": str(supervisor_id)},
+                {"supervisorId": supervisor_id}
+            ]
         }
         
+        # Add contact criteria
+        if email and email.strip():
+            search_criteria["email"] = email.strip()
+        elif phone and phone.strip():
+            # Try exact phone match first
+            search_criteria["$or"] = [
+                {"phone": phone.strip()},
+                {"phoneNumber": phone.strip()}
+            ]
+
+        # Log the search criteria for debugging
+        logger.debug(f"Search criteria for deleting guard: {search_criteria}")
+        logger.debug(f"Supervisor ID type: {type(supervisor_id)}, value: {supervisor_id}")
+
+        # Find guard
+        guard = await guards_collection.find_one(search_criteria)
+        
+        # If not found with exact match, try with case-insensitive name
+        if not guard:
+            logger.debug("Exact match failed, trying case-insensitive name match")
+            search_criteria["name"] = {"$regex": f"^{name_normalized}$", "$options": "i"}
+            guard = await guards_collection.find_one(search_criteria)
+        
+        if not guard:
+            # Log what we're actually looking for vs what's in the database
+            logger.debug(f"Guard not found. Looking for: name='{name_normalized}', email='{email}', phone='{phone}', supervisorId='{supervisor_id}'")
+            
+            # Try to find any guards with this supervisor to debug
+            all_supervisor_guards = await guards_collection.find({"$or": [
+                {"supervisorId": str(supervisor_id)},
+                {"supervisorId": supervisor_id}
+            ]}).to_list(length=10)
+            logger.debug(f"Found {len(all_supervisor_guards)} guards for this supervisor")
+            for g in all_supervisor_guards:
+                logger.debug(f"Existing guard: name='{g.get('name')}', email='{g.get('email')}', phone='{g.get('phone')}'")
+            
+            contact_type = "email" if email else "phone"
+            contact_value = email if email else phone
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No guard found with name '{name}' and {contact_type} '{contact_value}' in the system"
+            )
+
+        guard_id = str(guard["_id"])
+        user_id = guard.get("userId")
+
+        # Delete from guards collection
+        await guards_collection.delete_one({"_id": guard["_id"]})
+
+        # Delete from users collection if userId exists
+        if user_id:
+            await users_collection.delete_one({"_id": user_id})
+
+        logger.info(f"Supervisor {current_supervisor.get('name', 'Unknown')} deleted guard '{guard.get('name')}' with ID '{guard_id}'")
+
+        contact_type = "email" if email else "phone"
+        contact_value = email if email else phone
+        return {"message": f"Guard '{guard.get('name')}' with {contact_type} '{contact_value}' deleted successfully"}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -619,4 +786,5 @@ async def delete_guard(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete guard: {str(e)}"
         )
+
 
