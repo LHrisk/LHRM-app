@@ -41,6 +41,7 @@ class AuthorizationError(HTTPException):
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     """
     Get current authenticated user from JWT token
+    Queries the appropriate collection based on user role
     
     Args:
         token: JWT token from OAuth2 scheme
@@ -60,12 +61,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any
         raise AuthenticationError("Invalid or expired token")
     
     user_id = payload.get("user_id")
-    if not user_id:
+    role = payload.get("role")
+    if not user_id or not role:
         raise AuthenticationError("Invalid token payload")
     
-    # Get user from database
-    users_collection = get_users_collection()
-    if users_collection is None:
+    # Get appropriate collection based on role
+    if role == "ADMIN":
+        collection = get_users_collection()
+    elif role == "SUPERVISOR":
+        collection = get_supervisors_collection()
+    elif role == "GUARD":
+        collection = get_guards_collection()
+    else:
+        raise AuthenticationError("Invalid user role")
+    
+    if collection is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database not available"
@@ -78,13 +88,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any
     except Exception:
         raise AuthenticationError("Invalid user ID format")
     
-    user = await users_collection.find_one({"_id": user_object_id})
+    user = await collection.find_one({"_id": user_object_id})
     if not user:
         raise AuthenticationError("User not found")
     
     # Check if user is active
     if not user.get("isActive", False):
         raise AuthenticationError("Account is not active")
+    
+    # Add role from JWT token to user document for role-based access control
+    user["role"] = role
     
     return user
 
