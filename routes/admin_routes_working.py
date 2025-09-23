@@ -1,7 +1,5 @@
 """
 Admin routes for user management and system administration
-ADMIN role only - manage supervisors, guards, and system configuration
-Updated with specific email patterns: admin@lh.io.in, {area}supervisor@lh.io.in
 """
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
