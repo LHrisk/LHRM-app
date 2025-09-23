@@ -1,44 +1,65 @@
-from database import get_users_collection, init_database
-from services.jwt_service import jwt_service
-import asyncio
+import requests
+import json
 
-async def check_supervisor_status():
-    # Initialize database first
-    await init_database()
+def check_existing_supervisors():
+    """Check existing supervisors in database"""
     
-    users_collection = get_users_collection()
-    supervisor = await users_collection.find_one({'email': 'dhasmanakartik84@gmail.com'})
+    base_url = "http://localhost:8000"
     
-    if supervisor:
-        print(f'✅ Supervisor found: {supervisor["email"]}')
-        print(f'📋 Name: {supervisor.get("name", "N/A")}')
-        print(f'🎭 Role: {supervisor.get("role", "N/A")}')
-        print(f'🏙️ Area/City: {supervisor.get("areaCity", "N/A")}')
-        print(f'✅ Is Active: {supervisor.get("isActive", False)}')
-        print(f'📧 Email Verified: {supervisor.get("isEmailVerified", False)}')
-        
-        # Test password verification
-        password_field = supervisor.get('passwordHash')
-        if password_field:
-            # Test both possible passwords
-            test_passwords = ['Test@123', 'test@123']
-            for pwd in test_passwords:
-                is_valid = jwt_service.verify_password(pwd, password_field)
-                print(f'🔑 Password "{pwd}": {is_valid}')
-        else:
-            print('❌ No password hash found')
-            
-        print(f'📊 All supervisor fields: {list(supervisor.keys())}')
+    # Admin login
+    login_response = requests.post(
+        f"{base_url}/auth/login",
+        data={"username": "admin@lh.io.in", "password": "Test@123"}
+    )
+    
+    if login_response.status_code != 200:
+        print("❌ Admin login failed!")
+        return
+    
+    admin_token = login_response.json()["access_token"]
+    headers = {
+        "Authorization": f"Bearer {admin_token}",
+        "Content-Type": "application/json"
+    }
+    
+    print("✅ Admin login successful!")
+    
+    # Try to get admin dashboard to see stats
+    dashboard_response = requests.get(
+        f"{base_url}/admin/dashboard",
+        headers=headers
+    )
+    
+    if dashboard_response.status_code == 200:
+        dashboard_data = dashboard_response.json()
+        print(f"📊 Dashboard Stats:")
+        print(f"   Total Users: {dashboard_data['stats']['totalUsers']}")
+        print(f"   Total Supervisors: {dashboard_data['stats']['totalSupervisors']}")
+        print(f"   Total Guards: {dashboard_data['stats']['totalGuards']}")
+    
+    # Try creating supervisor with unique email
+    print("\n🧪 Testing supervisor creation with unique email...")
+    unique_supervisor_data = {
+        "name": "Unique Test Supervisor",
+        "email": f"unique.test.{int(requests.get('http://worldtimeapi.org/api/timezone/UTC').json()['unixtime'])}@lh.io.in",
+        "phone": "8765432100",
+        "password": "Test@123",
+        "areaCity": "UniqueCity"
+    }
+    
+    create_response = requests.post(
+        f"{base_url}/admin/add-supervisor",
+        headers=headers,
+        json=unique_supervisor_data
+    )
+    
+    print(f"📊 Creation Status: {create_response.status_code}")
+    if create_response.status_code == 200:
+        result = create_response.json()
+        print("✅ Supervisor created successfully!")
+        print(f"📋 Response: {json.dumps(result, indent=2)}")
     else:
-        print('❌ Supervisor not found in database')
-        
-        # Check if user exists with any variation
-        all_users = await users_collection.find({}).to_list(100)
-        print(f'📊 Total users in database: {len(all_users)}')
-        
-        for user in all_users:
-            if 'dhasmanakartik84' in user.get('email', ''):
-                print(f'🔍 Found similar user: {user["email"]} - Role: {user.get("role")}')
+        print(f"❌ Creation failed: {create_response.text}")
 
 if __name__ == "__main__":
-    asyncio.run(check_supervisor_status())
+    check_existing_supervisors()
