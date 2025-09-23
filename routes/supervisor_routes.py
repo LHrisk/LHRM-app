@@ -626,6 +626,24 @@ async def add_guard(
         # Generate a unique user ID
         user_id = f"user_{guard_count + 1}"  # Example: user_1
 
+        # Check if a guard with the same email or phone already exists
+        existing_guard = await guards_collection.find_one({
+            "$or": [
+                {"email": guard_data.email},
+                {"phone": guard_data.phone}
+            ]
+        })
+
+        if existing_guard:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A guard with the same email or phone already exists."
+            )
+
+        # Ensure email ends with '@gmail.com'
+        if not guard_data.email.endswith("@gmail.com"):
+            guard_data.email = guard_data.email.split("@")[0] + "@gmail.com"
+
         # Create guard record
         guard_data_record = {
             "guardId": guard_id,
