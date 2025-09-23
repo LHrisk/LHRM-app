@@ -133,21 +133,15 @@ async def list_sites(
         # Format response
         formatted_sites = []
         for site in sites:
-            # Clean up sites list (remove None values)
-            sites_list = [s for s in site.get("sites", []) if s is not None]
-            
+            # Include only the required fields
             formatted_sites.append({
-                "site_name": site["site_name"],
-                "created_at": site["created_at"].isoformat() if site.get("created_at") else None,
                 "qr_locations_count": site.get("qr_count", 0),
-                "sites_count": len(sites_list),
-                "sites": sites_list
+                "sites_count": len(site.get("sites", [])),
+                "sites": site.get("sites", [])
             })
 
         return {
-            "sites": formatted_sites,
-            "total_sites": total,
-            "message": f"Found {total} sites created by you"
+            "sites": formatted_sites
         }
 
     except HTTPException:
