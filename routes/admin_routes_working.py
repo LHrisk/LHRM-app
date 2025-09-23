@@ -1,5 +1,5 @@
 """
-Admin routes for user management and system administration
+Admin routes for user management and system administration,Hello
 """
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
