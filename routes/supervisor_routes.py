@@ -79,7 +79,7 @@ async def add_site(
         "createdBy": str(current_supervisor["_id"]),
         "createdAt": datetime.now(),
         "updatedAt": datetime.now(),
-        "supervisorId": current_supervisor["_id"]
+        "supervisorId": supervisor_id  # Use the ObjectId version for consistency
     }
 
     result = await qr_locations_collection.insert_one(site_data)
