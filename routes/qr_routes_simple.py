@@ -74,6 +74,18 @@ async def create_qr_code(
 
         return StreamingResponse(buf, media_type="image/png")
 
+    # Validate that the site exists in the database
+    existing_site = await qr_locations_collection.find_one({
+        "site": normalized_site,
+        "supervisorId": supervisor_id
+    })
+
+    if not existing_site:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The specified site does not exist."
+        )
+
     # Create new QR location
     qr_data = {
         "site": normalized_site,
