@@ -117,10 +117,11 @@ async def create_indexes():
         await database.guards.create_index("supervisorId")
         
         # QR Locations collection indexes
+        # Create unique index for QR locations (site + post + supervisor combination)
         await database.qr_locations.create_index(
-            [("organization", 1), ("site", 1), ("supervisorId", 1)],
+            [("site", 1), ("post", 1), ("supervisorId", 1)],
             unique=True,
-            name="org_site_supervisor_unique"
+            name="site_post_supervisor_unique"
         )
         await database.qr_locations.create_index([("lat", 1), ("lng", 1)])
         await database.qr_locations.create_index("active")
