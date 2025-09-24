@@ -30,6 +30,9 @@ qr_router = APIRouter()
 # ============================================================================
 # QR Code Creation API
 # ============================================================================
+from fastapi import Body
+import pymongo
+
 @qr_router.post("/create")
 async def create_qr_code(
     site: str = Body(..., embed=True, description="Site name created by the supervisor"),
@@ -64,9 +67,8 @@ async def create_qr_code(
         # Return existing QR code
         qr_id = str(existing_qr["_id"])
         qr_content = f"{normalized_site}:{post_name}:{qr_id}"
-        
-        import qrcode
-        import io
+        import qrcode, io
+        from fastapi.responses import StreamingResponse
 
         qr_img = qrcode.make(qr_content)
         buf = io.BytesIO()
@@ -143,8 +145,8 @@ async def create_qr_code(
     # Generate QR code with site, post, QR id
     qr_content = f"{normalized_site}:{post_name}:{qr_id}"
 
-    import qrcode
-    import io
+    import qrcode, io
+    from fastapi.responses import StreamingResponse
 
     qr_img = qrcode.make(qr_content)
     buf = io.BytesIO()
@@ -155,8 +157,9 @@ async def create_qr_code(
 
 
 # ============================================================================
-# QR Code List API
+# QR Code Assignment API
 # ============================================================================
+# Ensure only supervisors can access this endpoint
 @qr_router.get("/list")
 async def list_qr_codes(
     current_supervisor: Dict[str, Any] = Depends(get_current_supervisor),
@@ -170,17 +173,14 @@ async def list_qr_codes(
         if qr_locations_collection is None:
             raise HTTPException(status_code=503, detail="Database not available")
 
-        # Convert supervisor ID to ObjectId for consistency
-        supervisor_id = ObjectId(current_supervisor["_id"])
-
         # Build filter query
-        filter_query = {"supervisorId": supervisor_id}
+        filter_query = {"supervisorId": current_supervisor["_id"]}
 
         # Add site filter if provided
         if site:
             filter_query["site"] = {"$regex": site.strip(), "$options": "i"}
 
-        # Ensure 'post' field exists and is not empty (to get QR locations, not site records)
+        # Ensure 'post' field is not empty or null
         filter_query["post"] = {"$exists": True, "$ne": ""}
 
         # Get filtered QR locations for this supervisor
@@ -213,3 +213,11 @@ async def list_qr_codes(
     except Exception as e:
         logger.error(f"Error listing QR codes: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# QR MANAGEMENT ENDPOINTS REMOVED
+# The following endpoints have been removed:
+# - GET /qr/my-qr-image (Get My Qr Image) 
+# - POST /qr/scan (Scan Qr Code)
+# ============================================================================
