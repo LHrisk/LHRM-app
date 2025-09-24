@@ -55,17 +55,12 @@ async def add_site(
     normalized_site = site.strip()
     supervisor_id = ObjectId(current_supervisor["_id"]) if not isinstance(current_supervisor["_id"], ObjectId) else current_supervisor["_id"]
 
-    # Debug logs
-    print(f"Normalized site: {normalized_site}")
-    print(f"Supervisor ID: {supervisor_id}")
-
-    # Check if site already exists
+    # Check if site already exists (look for site records without post field)
     existing_site = await qr_locations_collection.find_one({
-        "site": {"$regex": f"^{normalized_site}$", "$options": "i"},  # Match site
-        "supervisorId": supervisor_id
+        "site": {"$regex": f"^{normalized_site}$", "$options": "i"},
+        "supervisorId": supervisor_id,
+        "post": {"$exists": False}  # This identifies site records
     })
-
-    print(f"Existing site query result: {existing_site}")
 
     if existing_site:
         raise HTTPException(
@@ -75,7 +70,7 @@ async def add_site(
 
     # Add new site
     site_data = {
-        "site": normalized_site,  # Save site
+        "site": normalized_site,
         "createdBy": str(current_supervisor["_id"]),
         "createdAt": datetime.now(),
         "updatedAt": datetime.now(),
@@ -88,8 +83,6 @@ async def add_site(
         "message": "Site added successfully",
         "siteId": str(result.inserted_id)
     }
-
-
 # ============================================================================
 # NEW: Supervisor List Buildings API
 # ============================================================================
