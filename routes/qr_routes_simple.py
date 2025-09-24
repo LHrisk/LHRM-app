@@ -52,6 +52,9 @@ async def create_qr_code(
     # Normalize site name and convert supervisorId to ObjectId
     normalized_site = site.strip()
     supervisor_id = ObjectId(current_supervisor["_id"])
+    
+    # Debug logging
+    logger.info(f"QR Create Request - Site: {normalized_site}, Supervisor ID: {supervisor_id}")
 
     # Check for existing QR location for this site and post
     existing_qr = await qr_locations_collection.find_one({
@@ -74,17 +77,33 @@ async def create_qr_code(
 
         return StreamingResponse(buf, media_type="image/png")
 
-    # Validate that the site exists in the database
-    existing_site = await qr_locations_collection.find_one({
+    # Validate that the site exists in the database (check for site records without post field)
+    site_query = {
         "site": normalized_site,
-        "supervisorId": supervisor_id
-    })
+        "supervisorId": supervisor_id,
+        "post": {"$exists": False}  # This identifies site records (not QR location records)
+    }
+    logger.info(f"Searching for site with query: {site_query}")
+    existing_site = await qr_locations_collection.find_one(site_query)
+    logger.info(f"Found site: {existing_site}")
 
     if not existing_site:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The specified site does not exist."
-        )
+        # Check if site exists but belongs to a different supervisor
+        any_site = await qr_locations_collection.find_one({
+            "site": normalized_site,
+            "post": {"$exists": False}
+        })
+        
+        if any_site:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Site '{normalized_site}' exists but belongs to another supervisor (ID: {any_site.get('supervisorId')}). Current supervisor ID: {supervisor_id}"
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The specified site does not exist."
+            )
 
     # Create new QR location
     qr_data = {
@@ -93,23 +112,35 @@ async def create_qr_code(
         "createdBy": str(current_supervisor["_id"]),
         "createdAt": datetime.now(),
         "updatedAt": datetime.now(),
-        "supervisorId": supervisor_id
+        "supervisorId": supervisor_id  # Already converted to ObjectId above
     }
 
     try:
+        logger.info(f"Attempting to insert QR data: {qr_data}")
         result = await qr_locations_collection.insert_one(qr_data)
         qr_id = str(result.inserted_id)
-    except DuplicateKeyError:
+        logger.info(f"Successfully created QR location with ID: {qr_id}")
+    except DuplicateKeyError as e:
+        logger.error(f"DuplicateKeyError occurred: {e}")
         # If duplicate key error occurs, fetch the existing record
-        existing_qr = await qr_locations_collection.find_one({
+        query = {
             "site": normalized_site,
             "post": post_name,
             "supervisorId": supervisor_id
-        })
+        }
+        logger.info(f"Searching for existing QR with query: {query}")
+        existing_qr = await qr_locations_collection.find_one(query)
+        logger.info(f"Found existing QR: {existing_qr}")
+        
         if existing_qr:
             qr_id = str(existing_qr["_id"])
+            logger.info(f"Using existing QR ID: {qr_id}")
         else:
+            logger.error("Failed to find existing QR location after duplicate key error")
             raise HTTPException(status_code=500, detail="Unable to create or find QR location")
+    except Exception as e:
+        logger.error(f"Unexpected error during QR creation: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
     # Generate QR code with site, post, QR id
     qr_content = f"{normalized_site}:{post_name}:{qr_id}"
