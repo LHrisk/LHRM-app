@@ -35,7 +35,7 @@ async def get_supervisor_dashboard(current_supervisor: Dict[str, Any] = Depends(
         
         logger.info(f"Collections: guards={guards_collection is not None}, qr={qr_locations_collection is not None}, scans={scan_events_collection is not None}")
         
-        if guards_collection is None or qr_locations_collection is None or scan_events_collection is None:
+        if not all([guards_collection, qr_locations_collection, scan_events_collection]):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
@@ -194,7 +194,7 @@ async def get_supervisor_guards(
         users_collection = get_users_collection()
         guards_collection = get_guards_collection()
         
-        if users_collection is None or guards_collection is None:
+        if not all([users_collection, guards_collection]):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
@@ -249,7 +249,7 @@ async def get_supervisor_scans(
     try:
         scan_events_collection = get_scan_events_collection()
         
-        if scan_events_collection is None:
+        if not scan_events_collection:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
