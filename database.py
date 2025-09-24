@@ -117,12 +117,27 @@ async def create_indexes():
         await database.guards.create_index("supervisorId")
         
         # QR Locations collection indexes
+        # First, drop the problematic old index if it exists
+        try:
+            await database.qr_locations.drop_index('org_site_supervisor_unique')
+            logger.info("🔄 Dropped old org_site_supervisor_unique index")
+        except Exception:
+            pass  # Index might not exist, which is fine
+        
         # Create unique index for QR locations (site + post + supervisor combination)
-        await database.qr_locations.create_index(
-            [("site", 1), ("post", 1), ("supervisorId", 1)],
-            unique=True,
-            name="site_post_supervisor_unique"
-        )
+        try:
+            await database.qr_locations.create_index(
+                [("site", 1), ("post", 1), ("supervisorId", 1)],
+                unique=True,
+                name="site_post_supervisor_unique"
+            )
+            logger.info("✅ Created site_post_supervisor_unique index")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("ℹ️  site_post_supervisor_unique index already exists")
+            else:
+                logger.warning(f"⚠️  Failed to create site_post_supervisor_unique index: {e}")
+        
         await database.qr_locations.create_index([("lat", 1), ("lng", 1)])
         await database.qr_locations.create_index("active")
         
