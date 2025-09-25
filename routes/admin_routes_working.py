@@ -304,30 +304,51 @@ async def add_supervisor(
         admin_id = str(current_admin["_id"])
         admin_name = current_admin.get("name", current_admin.get("email", "Admin"))
 
-        # Ensure at least one contact method is provided
-        if not supervisor_data.email and not supervisor_data.phone:
+        # Ensure at least one contact method is provided (check for empty strings too)
+        has_email = supervisor_data.email and supervisor_data.email.strip()
+        has_phone = supervisor_data.phone and supervisor_data.phone.strip()
+        
+        if not has_email and not has_phone:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Either email or phone must be provided"
             )
 
         # Determine if using email or phone
-        contact_method = "email" if supervisor_data.email else "phone"
-        contact_value = supervisor_data.email if supervisor_data.email else supervisor_data.phone
+        contact_method = "email" if has_email else "phone"
+        contact_value = supervisor_data.email.strip() if has_email else supervisor_data.phone.strip()
 
-        # Check if supervisor already exists (check both email and phone)
-        existing_supervisor = await supervisors_collection.find_one({
-            "$or": [
-                {"email": supervisor_data.email},
-                {"phone": supervisor_data.phone}
-            ]
-        })
+        # Check if supervisor already exists (only check non-empty values)
+        or_conditions = []
+        
+        # Only check email if it's provided and not empty
+        if supervisor_data.email and supervisor_data.email.strip():
+            or_conditions.append({"email": supervisor_data.email.strip()})
+        
+        # Only check phone if it's provided and not empty
+        if supervisor_data.phone and supervisor_data.phone.strip():
+            or_conditions.append({"phone": supervisor_data.phone.strip()})
+        
+        # Only run the query if we have conditions to check
+        if or_conditions:
+            existing_supervisor = await supervisors_collection.find_one({
+                "$or": or_conditions
+            })
 
-        if existing_supervisor:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Supervisor with {contact_method} {contact_value} already exists"
-            )
+            if existing_supervisor:
+                # Determine which field matched
+                if (supervisor_data.email and supervisor_data.email.strip() and 
+                    existing_supervisor.get("email") == supervisor_data.email.strip()):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Supervisor with email {supervisor_data.email} already exists"
+                    )
+                elif (supervisor_data.phone and supervisor_data.phone.strip() and 
+                      existing_supervisor.get("phone") == supervisor_data.phone.strip()):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Supervisor with phone {supervisor_data.phone} already exists"
+                    )
 
         # Hash the password
         hashed_password = jwt_service.hash_password(supervisor_data.password)
@@ -342,11 +363,11 @@ async def add_supervisor(
             "updatedAt": datetime.utcnow()
         }
 
-        # Add email or phone to supervisor record
-        if supervisor_data.email:
-            supervisor_data_record["email"] = supervisor_data.email
-        if supervisor_data.phone:
-            supervisor_data_record["phone"] = supervisor_data.phone
+        # Add email or phone to supervisor record (only if not empty)
+        if supervisor_data.email and supervisor_data.email.strip():
+            supervisor_data_record["email"] = supervisor_data.email.strip()
+        if supervisor_data.phone and supervisor_data.phone.strip():
+            supervisor_data_record["phone"] = supervisor_data.phone.strip()
 
         # Generate an incrementing id like sp1, sp2, etc.
         last_supervisor = await supervisors_collection.find_one(
@@ -369,17 +390,23 @@ async def add_supervisor(
         # Insert supervisor
         supervisor_result = await supervisors_collection.insert_one(supervisor_data_record)
 
-        # Construct response with the new id
+        # Construct response with the new id (only include non-empty contact info)
+        response_supervisor = {
+            "id": new_id,
+            "name": supervisor_data.name,
+            "areaCity": supervisor_data.areaCity,
+            "adminName": admin_name
+        }
+        
+        # Add email and phone only if they were provided
+        if has_email:
+            response_supervisor["email"] = supervisor_data.email.strip()
+        if has_phone:
+            response_supervisor["phone"] = supervisor_data.phone.strip()
+        
         return {
             "message": "Supervisor added successfully",
-            "supervisor": {
-                "id": new_id,
-                "name": supervisor_data.name,
-                "email": supervisor_data.email,
-                "phone": supervisor_data.phone,
-                "areaCity": supervisor_data.areaCity,
-                "adminName": admin_name
-            }
+            "supervisor": response_supervisor
         }
         
     except HTTPException:
