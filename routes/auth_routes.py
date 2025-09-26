@@ -417,6 +417,11 @@ async def login(username: str = Form(...), password: str = Form(...)):
                     detail="User data corrupted - missing password"
                 )
             
+            # Debug information
+            print(f"🔍 Password length: {len(password)} characters")
+            print(f"🔍 Password bytes length: {len(password.encode('utf-8'))} bytes")
+            print(f"🔍 Hash format looks valid: {password_hash.startswith('$2b$')}")
+            
             password_valid = jwt_service.verify_password(password, password_hash)
             if not password_valid:
                 print(f"❌ Password verification failed")
@@ -429,10 +434,31 @@ async def login(username: str = Form(...), password: str = Form(...)):
             raise
         except Exception as e:
             print(f"❌ Password verification error: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Password verification failed: {str(e)}"
-            )
+            # Check if it's the bcrypt 72-byte error specifically
+            if "72 bytes" in str(e).lower():
+                print(f"🔧 Detected bcrypt 72-byte limit error - truncating password")
+                # Try with truncated password
+                try:
+                    truncated_password = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+                    password_valid = jwt_service.verify_password(truncated_password, password_hash)
+                    if password_valid:
+                        print(f"✅ Password verification succeeded with truncation")
+                    else:
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid email/phone or password"
+                        )
+                except Exception as e2:
+                    print(f"❌ Password verification still failed after truncation: {e2}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Password verification system error"
+                    )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Password verification failed: {str(e)}"
+                )
 
         # Check if user is active
         print(f"🔍 Checking if user is active...")
