@@ -114,15 +114,23 @@ class JWTService:
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify password against hash"""
         try:
-            # Bcrypt has a 72-byte limit, truncate if necessary
-            if len(plain_password.encode('utf-8')) > 72:
-                logger.warning("Password too long for verification, truncating to 72 bytes")
-                plain_password = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
-            
+            # First attempt with original password
             return pwd_context.verify(plain_password, hashed_password)
         except Exception as e:
-            logger.error(f"Password verification failed: {e}")
-            return False
+            error_msg = str(e).lower()
+            if "72 bytes" in error_msg or "cannot be longer than 72 bytes" in error_msg:
+                logger.warning("Password too long for bcrypt, attempting truncation...")
+                try:
+                    # Truncate password to 72 bytes and try again
+                    truncated_password = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+                    logger.info(f"Truncated password from {len(plain_password)} to {len(truncated_password)} characters")
+                    return pwd_context.verify(truncated_password, hashed_password)
+                except Exception as e2:
+                    logger.error(f"Password verification failed even after truncation: {e2}")
+                    return False
+            else:
+                logger.error(f"Password verification failed: {e}")
+                return False
     
     def generate_otp(self) -> str:
         """Generate a 6-digit OTP"""
