@@ -421,9 +421,17 @@ async def login(username: str = Form(...), password: str = Form(...)):
         print(f"🔍 Password bytes length: {len(password.encode('utf-8'))} bytes")
         print(f"🔍 Hash format looks valid: {password_hash.startswith('$2b$')}")
         
+        print(f"🔍 Attempting password verification...")
+        print(f"🔍 Hash preview: {password_hash[:20]}...")
+        
         password_valid = jwt_service.verify_password(password, password_hash)
         if not password_valid:
             print(f"❌ Password verification failed")
+            # Try one more debug attempt with a simple test
+            print(f"🔍 Testing with empty password as debug...")
+            debug_result = jwt_service.verify_password("", password_hash)
+            print(f"🔍 Debug empty password result: {debug_result}")
+            
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email/phone or password"
