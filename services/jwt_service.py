@@ -23,10 +23,9 @@ warnings.filterwarnings("ignore", message=".*bcrypt.*", category=UserWarning)
 pwd_context = CryptContext(
     schemes=["bcrypt"], 
     deprecated="auto",
-    bcrypt__rounds=12  # Specify rounds to avoid version issues
+    bcrypt__rounds=12,  # Specify rounds to avoid version issues
+    bcrypt__truncate_error=True  # Enable bcrypt truncation for long passwords
 )
-
-
 class JWTService:
     """JWT token management service"""
     
@@ -101,11 +100,29 @@ class JWTService:
     
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt"""
-        return pwd_context.hash(password)
+        try:
+            # Bcrypt has a 72-byte limit, truncate if necessary
+            if len(password.encode('utf-8')) > 72:
+                logger.warning("Password too long, truncating to 72 bytes")
+                password = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+            
+            return pwd_context.hash(password)
+        except Exception as e:
+            logger.error(f"Password hashing failed: {e}")
+            raise ValueError(f"Password hashing failed: {str(e)}")
     
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify password against hash"""
-        return pwd_context.verify(plain_password, hashed_password)
+        try:
+            # Bcrypt has a 72-byte limit, truncate if necessary
+            if len(plain_password.encode('utf-8')) > 72:
+                logger.warning("Password too long for verification, truncating to 72 bytes")
+                plain_password = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+            
+            return pwd_context.verify(plain_password, hashed_password)
+        except Exception as e:
+            logger.error(f"Password verification failed: {e}")
+            return False
     
     def generate_otp(self) -> str:
         """Generate a 6-digit OTP"""
