@@ -115,23 +115,47 @@ class JWTService:
             return None
     
     def hash_password(self, password: str) -> str:
-        """Hash password using bcrypt"""
+        """Hash password using bcrypt with dynamic fallback strategy"""
         try:
-            # Truncate password to 72 bytes if necessary
-            if len(password.encode('utf-8')) > 72:
-                logger.warning("Password too long, truncating to 72 bytes")
-                password = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
-            
+            # Strategy 1: Try with raw bcrypt if flag is set
             if use_raw_bcrypt:
-                import bcrypt
-                password_bytes = password.encode('utf-8')
-                salt = bcrypt.gensalt(rounds=12)
-                return bcrypt.hashpw(password_bytes, salt).decode('utf-8')
-            else:
-                return pwd_context.hash(password)
+                return self._hash_with_raw_bcrypt(password)
+            
+            # Strategy 2: Try with passlib first, fallback to raw bcrypt if it fails
+            try:
+                # Truncate password to 72 bytes if necessary for passlib
+                processed_password = password
+                if len(password.encode('utf-8')) > 72:
+                    logger.warning("Password too long for passlib, truncating to 72 bytes")
+                    processed_password = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+                
+                return pwd_context.hash(processed_password)
+            except Exception as passlib_error:
+                logger.warning(f"Passlib hashing failed: {passlib_error}, trying raw bcrypt")
+                return self._hash_with_raw_bcrypt(password)
+                
         except Exception as e:
-            logger.error(f"Password hashing failed: {e}")
+            logger.error(f"All password hashing strategies failed: {e}")
             raise ValueError(f"Password hashing failed: {str(e)}")
+    
+    def _hash_with_raw_bcrypt(self, password: str) -> str:
+        """Hash password using raw bcrypt with 72-byte handling"""
+        try:
+            import bcrypt
+            
+            # Ensure password is within bcrypt's 72-byte limit
+            password_bytes = password.encode('utf-8')
+            if len(password_bytes) > 72:
+                logger.info(f"Truncating password from {len(password_bytes)} to 72 bytes for bcrypt hashing")
+                password_bytes = password_bytes[:72]
+            
+            salt = bcrypt.gensalt(rounds=12)
+            hash_bytes = bcrypt.hashpw(password_bytes, salt)
+            return hash_bytes.decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Raw bcrypt hashing failed: {e}")
+            raise ValueError(f"Raw bcrypt hashing failed: {str(e)}")
     
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify password against hash with multiple fallback strategies"""
