@@ -6,7 +6,6 @@ Handles token creation, validation, and refresh token management
 import jwt
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-from passlib.context import CryptContext
 import secrets
 import hashlib
 from config import settings
@@ -16,16 +15,33 @@ import warnings
 
 logger = logging.getLogger(__name__)
 
-# Suppress bcrypt version warnings
-warnings.filterwarnings("ignore", message=".*bcrypt.*", category=UserWarning)
+# Suppress all bcrypt-related warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*bcrypt.*")
+warnings.filterwarnings("ignore", message=".*trapped.*")
 
-# Password hashing context with updated configuration
-pwd_context = CryptContext(
-    schemes=["bcrypt"], 
-    deprecated="auto",
-    bcrypt__rounds=12,  # Specify rounds to avoid version issues
-    bcrypt__truncate_error=True  # Enable bcrypt truncation for long passwords
-)
+# Try to initialize passlib, fallback to raw bcrypt if it fails
+pwd_context = None
+use_raw_bcrypt = False
+
+try:
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(
+        schemes=["bcrypt"], 
+        deprecated="auto",
+        bcrypt__rounds=12,
+        bcrypt__truncate_error=False
+    )
+    logger.info("Using passlib CryptContext for password hashing")
+except Exception as e:
+    logger.warning(f"Passlib initialization failed: {e}, falling back to raw bcrypt")
+    use_raw_bcrypt = True
+    try:
+        import bcrypt
+        logger.info("Using raw bcrypt for password hashing")
+    except ImportError:
+        logger.error("Neither passlib nor bcrypt is available!")
+        raise ImportError("No bcrypt implementation available")
 class JWTService:
     """JWT token management service"""
     
@@ -101,36 +117,62 @@ class JWTService:
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt"""
         try:
-            # Bcrypt has a 72-byte limit, truncate if necessary
+            # Truncate password to 72 bytes if necessary
             if len(password.encode('utf-8')) > 72:
                 logger.warning("Password too long, truncating to 72 bytes")
                 password = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
             
-            return pwd_context.hash(password)
+            if use_raw_bcrypt:
+                import bcrypt
+                password_bytes = password.encode('utf-8')
+                salt = bcrypt.gensalt(rounds=12)
+                return bcrypt.hashpw(password_bytes, salt).decode('utf-8')
+            else:
+                return pwd_context.hash(password)
         except Exception as e:
             logger.error(f"Password hashing failed: {e}")
             raise ValueError(f"Password hashing failed: {str(e)}")
     
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify password against hash"""
+        """Verify password against hash with multiple fallback strategies"""
         try:
-            # First attempt with original password
-            return pwd_context.verify(plain_password, hashed_password)
+            # Strategy 1: Try with raw bcrypt if flag is set or if passlib fails
+            if use_raw_bcrypt:
+                return self._verify_with_raw_bcrypt(plain_password, hashed_password)
+            
+            # Strategy 2: Try with passlib first
+            try:
+                return pwd_context.verify(plain_password, hashed_password)
+            except Exception as passlib_error:
+                logger.warning(f"Passlib verification failed: {passlib_error}, trying raw bcrypt")
+                return self._verify_with_raw_bcrypt(plain_password, hashed_password)
+                
         except Exception as e:
-            error_msg = str(e).lower()
-            if "72 bytes" in error_msg or "cannot be longer than 72 bytes" in error_msg:
-                logger.warning("Password too long for bcrypt, attempting truncation...")
-                try:
-                    # Truncate password to 72 bytes and try again
-                    truncated_password = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
-                    logger.info(f"Truncated password from {len(plain_password)} to {len(truncated_password)} characters")
-                    return pwd_context.verify(truncated_password, hashed_password)
-                except Exception as e2:
-                    logger.error(f"Password verification failed even after truncation: {e2}")
-                    return False
+            logger.error(f"All password verification strategies failed: {e}")
+            return False
+    
+    def _verify_with_raw_bcrypt(self, plain_password: str, hashed_password: str) -> bool:
+        """Verify password using raw bcrypt with 72-byte handling"""
+        try:
+            import bcrypt
+            
+            # Ensure password is within bcrypt's 72-byte limit
+            password_bytes = plain_password.encode('utf-8')
+            if len(password_bytes) > 72:
+                logger.info(f"Truncating password from {len(password_bytes)} to 72 bytes for bcrypt")
+                password_bytes = password_bytes[:72]
+            
+            # Convert hash string back to bytes if needed
+            if isinstance(hashed_password, str):
+                hash_bytes = hashed_password.encode('utf-8')
             else:
-                logger.error(f"Password verification failed: {e}")
-                return False
+                hash_bytes = hashed_password
+            
+            return bcrypt.checkpw(password_bytes, hash_bytes)
+            
+        except Exception as e:
+            logger.error(f"Raw bcrypt verification failed: {e}")
+            return False
     
     def generate_otp(self) -> str:
         """Generate a 6-digit OTP"""
